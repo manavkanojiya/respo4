@@ -1,0 +1,257 @@
+import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from docx import Document
+from docx.shared import Inches, Pt, RGBColor
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml import OxmlElement, parse_xml
+from docx.oxml.ns import nsdecls, qn
+
+# ==========================================
+# 1. SETUP ENVIRONMENT & CONFIGURATION
+# ==========================================
+np.random.seed(42)
+sns.set_theme(style='whitegrid')
+plt.rcParams['figure.figsize'] = (7, 4.5)
+plt.rcParams['font.family'] = 'sans-serif'
+
+# Create chart output folder
+os.makedirs("charts", exist_ok=True)
+
+# ==========================================
+# 2. RAW DATA GENERATION (WITH MESSY ERRORS)
+# ==========================================
+n_samples = 500
+
+# Generate realistic underlying data
+departments_pool = ['Engineering', 'Sales', 'Operations', 'Marketing', 'HR', 'ENG', 'Sales ', 'hr', None]
+salaries = np.random.normal(loc=65000, scale=18000, size=n_samples)
+salaries = np.clip(salaries, 30000, 130000)
+
+performance = np.random.choice([1.0, 2.0, 3.0, 4.0, 5.0], size=n_samples, p=[0.1, 0.2, 0.4, 0.2, 0.1])
+
+# Formulate realistic correlation: lower salary -> higher turnover
+turnover_prob = 1.0 - (salaries - 30000) / 100000
+turnover_prob = np.clip(turnover_prob * 0.6, 0.05, 0.85)
+turnover = np.random.binomial(1, turnover_prob)
+
+# Create raw DataFrame
+df_raw = pd.DataFrame({
+    'Employee_ID': [f"EMP_{i:03d}" for i in range(1, n_samples + 1)],
+    'Department': np.random.choice(departments_pool, size=n_samples),
+    'Salary': salaries,
+    'Performance_Score': performance,
+    'Turnover': turnover
+})
+
+# Inject real-world noise (missing values)
+df_raw.loc[df_raw.sample(frac=0.08).index, 'Salary'] = np.nan
+df_raw.loc[df_raw.sample(frac=0.05).index, 'Performance_Score'] = np.nan
+
+# ==========================================
+# 3. AUTOMATED PIPELINE & CLEANING
+# ==========================================
+def automated_cleaning_pipeline(df_input):
+    df = df_input.copy()
+    
+    # Standardize string fields
+    df['Department'] = df['Department'].fillna('Unknown').str.strip().str.title()
+    df['Department'] = df['Department'].replace({'Eng': 'Engineering', 'Hr': 'HR'})
+    
+    # Impute missing salaries via statistical median
+    df['Salary'] = df['Salary'].fillna(df['Salary'].median())
+    
+    # Impute missing performance via mode
+    mode_perf = df['Performance_Score'].mode()[0]
+    df['Performance_Score'] = df['Performance_Score'].fillna(mode_perf)
+    
+    # Fix classifications
+    df['Turnover'] = df['Turnover'].astype(int)
+    
+    # Segment income distributions
+    bins = [0, 45000, 75000, 100000, float('inf')]
+    labels = ['Low', 'Medium', 'High', 'Executive']
+    df['Salary_Band'] = pd.cut(df['Salary'], bins=bins, labels=labels)
+    
+    return df
+
+df_clean = automated_cleaning_pipeline(df_raw)
+
+# ==========================================
+# 4. EXPLORATORY DATA AGGREGATIONS
+# ==========================================
+dept_matrix = df_clean.groupby('Department').agg(
+    Headcount=('Employee_ID', 'count'),
+    Average_Salary=('Salary', 'mean'),
+    Turnover_Rate=('Turnover', 'mean')
+).reset_index()
+
+# Convert rates to percentages
+dept_matrix['Turnover_Rate'] = dept_matrix['Turnover_Rate'] * 100
+
+salary_matrix = df_clean.groupby('Salary_Band', observed=False).agg(
+    Headcount=('Employee_ID', 'count'),
+    Turnover_Rate=('Turnover', 'mean')
+).reset_index()
+salary_matrix['Turnover_Rate'] = salary_matrix['Turnover_Rate'] * 100
+
+# ==========================================
+# 5. DATA VISUALIZATION GENERATION
+# ==========================================
+# Fig 5.1: Headcount Distribution
+plt.figure()
+sns.countplot(data=df_clean, y='Department', order=df_clean['Department'].value_counts().index, palette='viridis')
+plt.title('Workforce Distribution Across Corporate Departments', fontsize=12, fontweight='bold', pad=12)
+plt.xlabel('Employee Count')
+plt.tight_layout()
+plt.savefig('charts/fig1_headcount.png', dpi=300)
+plt.close()
+
+# Fig 5.2: Salary Distribution
+plt.figure()
+sns.histplot(data=df_clean, x='Salary', kde=True, color='#1f77b4', bins=15)
+plt.title('Salary Distribution Profile with Density Overlay', fontsize=12, fontweight='bold', pad=12)
+plt.xlabel('Annual Salary ($)')
+plt.ylabel('Frequency Count')
+plt.tight_layout()
+plt.savefig('charts/fig2_salary.png', dpi=300)
+plt.close()
+
+# Fig 5.3: Scatter Performance vs Salary
+plt.figure()
+sns.scatterplot(data=df_clean, x='Salary', y='Performance_Score', hue='Turnover', palette={0: '#2ca02c', 1: '#d62728'}, alpha=0.7)
+plt.title('Salary Level vs Performance Score Matrix by Attrition Status', fontsize=11, fontweight='bold', pad=12)
+plt.xlabel('Salary ($)')
+plt.ylabel('Performance Rating (1-5)')
+plt.legend(title='Turnover Status', labels=['Active (0)', 'Left (1)'])
+plt.tight_layout()
+plt.savefig('charts/fig3_scatter.png', dpi=300)
+plt.close()
+
+# Fig 5.4: Turnover by Salary Band
+plt.figure()
+sns.barplot(data=salary_matrix, x='Salary_Band', y='Turnover_Rate', palette='Reds_r')
+plt.title('Turnover Rate Breakdown by Salary Band', fontsize=12, fontweight='bold', pad=12)
+plt.xlabel('Segmented Salary Tiers')
+plt.ylabel('Observed Attrition Rate (%)')
+plt.tight_layout()
+plt.savefig('charts/fig4_turnover.png', dpi=300)
+plt.close()
+
+# ==========================================
+# 6. WORD DOCUMENT GENERATION (.DOCX)
+# ==========================================
+doc = Document()
+
+# Define Base Formatting Colors
+PRIMARY_COLOR = RGBColor(31, 78, 121)    # Deep Navy
+SECONDARY_COLOR = RGBColor(127, 127, 127) # Cool Muted Slate
+TEXT_COLOR = RGBColor(51, 51, 51)       # Charcoal
+
+# Helper formatting functions
+def format_run(run, font_name='Arial', size_pt=11, color=TEXT_COLOR, bold=False, italic=False):
+    run.font.name = font_name
+    run.font.size = Pt(size_pt)
+    run.font.color.rgb = color
+    run.bold = bold
+    run.italic = italic
+
+def set_cell_background(cell, fill_hex):
+    tcPr = cell._tc.get_or_add_tcPr()
+    shd = parse_xml(f'<w:shd {nsdecls("w")} w:fill="{fill_hex}"/>')
+    tcPr.append(shd)
+
+def set_cell_margins(cell, top=100, bottom=100, left=150, right=150):
+    tcPr = cell._tc.get_or_add_tcPr()
+    tcMar = OxmlElement('w:tcMar')
+    for m, val in [('top', top), ('bottom', bottom), ('left', left), ('right', right)]:
+        node = OxmlElement(f'w:{m}')
+        node.set(qn('w:w'), str(val))
+        node.set(qn('w:type'), 'dxa')
+        tcMar.append(node)
+    tcPr.append(tcMar)
+
+# Title Block
+title_p = doc.add_paragraph()
+title_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+run = title_p.add_run("HR DATA ANALYTICS & RETENTION BLUEPRINT")
+format_run(run, size_pt=24, color=PRIMARY_COLOR, bold=True)
+
+subtitle_p = doc.add_paragraph()
+subtitle_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+run = subtitle_p.add_run("An End-to-End Enterprise Data Engineering Pipeline & Exploratory Report")
+format_run(run, size_pt=12, color=SECONDARY_COLOR, italic=True)
+doc.add_paragraph()
+
+# 1. Executive Summary
+h1 = doc.add_heading(level=1)
+run = h1.add_run("1. Executive Summary")
+format_run(run, size_pt=16, color=PRIMARY_COLOR, bold=True)
+p = doc.add_paragraph()
+run = p.add_run("Modern corporate settings present severe retention risks driven by salary disparities. This technical blueprint presents an end-to-end framework starting from messy corporate databases to a clean pipeline, revealing critical attrition trends.")
+format_run(run)
+
+# 2. Environment Configuration
+h1 = doc.add_heading(level=1)
+run = h1.add_run("2. Environment & Pipeline Sandbox")
+format_run(run, size_pt=16, color=PRIMARY_COLOR, bold=True)
+
+p = doc.add_paragraph()
+run = p.add_run("The engineering environment leverages standard mathematical modeling packages to build reproducible analytical processes:")
+format_run(run)
+
+code_snippet_1 = """import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# Configure global chart properties
+sns.set_theme(style='whitegrid')
+plt.rcParams['figure.figsize'] = (7, 4.5)"""
+
+code_p = doc.add_paragraph()
+code_p.paragraph_format.left_indent = Inches(0.25)
+run = code_p.add_run(code_snippet_1)
+format_run(run, font_name='Courier New', size_pt=10, color=RGBColor(40, 40, 40))
+
+# 3. Data Cleansing Framework
+h1 = doc.add_heading(level=1)
+run = h1.add_run("3. Automated Engineering Clean Pipeline")
+format_run(run, size_pt=16, color=PRIMARY_COLOR, bold=True)
+
+p = doc.add_paragraph()
+run = p.add_run("The custom production function below removes structural string anomalies, normalizes team entries, replaces empty payroll rows with the calculated median, and corrects data typings:")
+format_run(run)
+
+code_snippet_2 = """def automated_cleaning_pipeline(df_raw):
+    df = df_raw.copy()
+    # Fix casing & empty spaces
+    df['Department'] = df['Department'].fillna('Unknown').str.strip().str.title()
+    df['Department'] = df['Department'].replace({'Eng': 'Engineering', 'Hr': 'HR'})
+    # Impute salary metrics with median
+    df['Salary'] = df['Salary'].fillna(df['Salary'].median())
+    # Fill performance indices with the statistical mode
+    df['Performance_Score'] = df['Performance_Score'].fillna(df['Performance_Score'].mode()[0])
+    return df"""
+
+code_p2 = doc.add_paragraph()
+code_p2.paragraph_format.left_indent = Inches(0.25)
+run = code_p2.add_run(code_snippet_2)
+format_run(run, font_name='Courier New', size_pt=10, color=RGBColor(40, 40, 40))
+
+# 4. Consolidated Summary Metrics Table
+h1 = doc.add_heading(level=1)
+run = h1.add_run("4. Department Performance Matrix")
+format_run(run, size_pt=16, color=PRIMARY_COLOR, bold=True)
+
+p = doc.add_paragraph()
+run = p.add_run("The table below details cross-examined corporate department aggregations derived from our processed framework:")
+format_run(run)
+
+table = doc.add_table(rows=1, cols=4)
+hdr_cells = table.rows[0].cells
+headers = ['Department Group', 'Active Headcount', 'Average Salary ($)', 'Turnover Rate (%)']
+for i, h_text in enumerate(headers):
+    hdr_cells[i].text = h_text
